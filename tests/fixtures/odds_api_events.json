@@ -1,0 +1,62 @@
+[
+  {
+    "id": "e1c0f8a1d2b3",
+    "sport_key": "baseball_mlb",
+    "commence_time": "2024-06-15T23:10:00Z",
+    "home_team": "New York Mets",
+    "away_team": "Atlanta Braves",
+    "bookmakers": [
+      {
+        "key": "pinnacle",
+        "title": "Pinnacle",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2024-06-15T20:00:00Z",
+            "outcomes": [
+              {"name": "New York Mets", "price": 2.05},
+              {"name": "Atlanta Braves", "price": 1.87}
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2024-06-15T20:00:00Z",
+            "outcomes": [
+              {"name": "Over", "price": 1.91, "point": 8.5},
+              {"name": "Under", "price": 1.91, "point": 8.5}
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2024-06-15T20:00:00Z",
+            "outcomes": [
+              {"name": "New York Mets", "price": 2.35, "point": -1.5},
+              {"name": "Atlanta Braves", "price": 1.65, "point": 1.5}
+            ]
+          },
+          {
+            "key": "h2h_lay",
+            "last_update": "2024-06-15T20:00:00Z",
+            "outcomes": []
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "f2d1a9b8c7e6",
+    "sport_key": "baseball_mlb",
+    "commence_time": "2024-06-15T18:00:00Z",
+    "home_team": "Tokyo Giants",
+    "away_team": "New York Mets",
+    "bookmakers": []
+  },
+  {
+    "id": "a3b2c1d0e9f8",
+    "sport_key": "baseball_mlb",
+    "commence_time": "2024-06-20T23:05:00Z",
+    "home_team": "Atlanta Braves",
+    "away_team": "New York Yankees",
+    "bookmakers": []
+  }
+]

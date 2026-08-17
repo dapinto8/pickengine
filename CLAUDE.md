@@ -70,6 +70,15 @@ pickengine/
 tests/
 ```
 
+## Configuration
+
+Tunable model parameters (elo_k, elo_per_fip, blend_weight_model, min_ev) live in
+`pickengine.toml` at the repo root, written by `pickengine tune` and loaded by the
+pipeline CLI commands (see `pickengine/config.py`). Code constants are the defaults
+when the file is absent; never hand-edit code constants to tune — use the config file.
+Tuning uses a strict time-based 70/30 split; the holdout result may be looked at once
+per major model change.
+
 ## Commands
 
 - Run CLI: `uv run python -m pickengine --help`

@@ -1,0 +1,43 @@
+{
+  "stats": [
+    {
+      "type": {"displayName": "gameLog"},
+      "group": {"displayName": "pitching"},
+      "splits": [
+        {
+          "date": "2024-06-01",
+          "stat": {
+            "inningsPitched": "6.0",
+            "strikeOuts": 7,
+            "baseOnBalls": 2,
+            "homeRuns": 1,
+            "hitByPitch": 0,
+            "gamesStarted": 1
+          }
+        },
+        {
+          "date": "2024-06-07",
+          "stat": {
+            "inningsPitched": "5.1",
+            "strikeOuts": 4,
+            "baseOnBalls": 3,
+            "homeRuns": 2,
+            "hitByPitch": 1,
+            "gamesStarted": 1
+          }
+        },
+        {
+          "date": "2024-06-14",
+          "stat": {
+            "inningsPitched": "7.0",
+            "strikeOuts": 9,
+            "baseOnBalls": 1,
+            "homeRuns": 0,
+            "hitByPitch": 0,
+            "gamesStarted": 1
+          }
+        }
+      ]
+    }
+  ]
+}
