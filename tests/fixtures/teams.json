@@ -1,0 +1,22 @@
+{
+  "teams": [
+    {
+      "id": 121,
+      "name": "New York Mets",
+      "abbreviation": "NYM",
+      "league": {"id": 104, "name": "National League"}
+    },
+    {
+      "id": 147,
+      "name": "New York Yankees",
+      "abbreviation": "NYY",
+      "league": {"id": 103, "name": "American League"}
+    },
+    {
+      "id": 144,
+      "name": "Atlanta Braves",
+      "abbreviation": "ATL",
+      "league": {"id": 104, "name": "National League"}
+    }
+  ]
+}

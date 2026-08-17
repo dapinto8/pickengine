@@ -1,0 +1,92 @@
+{
+  "dates": [
+    {
+      "date": "2024-06-15",
+      "games": [
+        {
+          "gamePk": 745001,
+          "gameType": "R",
+          "season": "2024",
+          "gameDate": "2024-06-15T17:10:00Z",
+          "status": {
+            "abstractGameState": "Final",
+            "codedGameState": "F",
+            "detailedState": "Final"
+          },
+          "teams": {
+            "away": {
+              "score": 5,
+              "team": {"id": 144, "name": "Atlanta Braves"},
+              "probablePitcher": {"id": 665742, "fullName": "Spencer Strider"}
+            },
+            "home": {
+              "score": 3,
+              "team": {"id": 121, "name": "New York Mets"},
+              "probablePitcher": {"id": 656849, "fullName": "David Peterson"}
+            }
+          }
+        },
+        {
+          "gamePk": 745002,
+          "gameType": "R",
+          "season": "2024",
+          "gameDate": "2024-06-15T23:05:00Z",
+          "status": {
+            "abstractGameState": "Preview",
+            "codedGameState": "S",
+            "detailedState": "Scheduled"
+          },
+          "teams": {
+            "away": {
+              "team": {"id": 147, "name": "New York Yankees"},
+              "probablePitcher": {"id": 543037, "fullName": "Gerrit Cole"}
+            },
+            "home": {
+              "team": {"id": 121, "name": "New York Mets"}
+            }
+          }
+        },
+        {
+          "gamePk": 745003,
+          "gameType": "R",
+          "season": "2024",
+          "gameDate": "2024-06-15T20:10:00Z",
+          "status": {
+            "abstractGameState": "Preview",
+            "codedGameState": "D",
+            "detailedState": "Postponed"
+          },
+          "teams": {
+            "away": {
+              "team": {"id": 147, "name": "New York Yankees"}
+            },
+            "home": {
+              "team": {"id": 144, "name": "Atlanta Braves"}
+            }
+          }
+        },
+        {
+          "gamePk": 745004,
+          "gameType": "S",
+          "season": "2024",
+          "gameDate": "2024-06-15T18:00:00Z",
+          "status": {
+            "abstractGameState": "Final",
+            "codedGameState": "F",
+            "detailedState": "Final"
+          },
+          "teams": {
+            "away": {
+              "score": 2,
+              "team": {"id": 147, "name": "New York Yankees"}
+            },
+            "home": {
+              "score": 1,
+              "team": {"id": 121, "name": "New York Mets"}
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

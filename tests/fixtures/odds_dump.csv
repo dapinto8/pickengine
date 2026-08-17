@@ -1,0 +1,6 @@
+date,home_team,away_team,book,market,outcome,decimal_odds,line,timestamp,is_closing
+2024-06-15,New York Mets,Atlanta Braves,pinnacle,h2h,New York Mets,2.02,,2024-06-15T22:55:00Z,true
+2024-06-15,New York Mets,Atlanta Braves,pinnacle,h2h,Atlanta Braves,1.89,,2024-06-15T22:55:00Z,true
+2024-06-15,New York Mets,Atlanta Braves,pinnacle,h2h,Atlanta Braves,1.89,,2024-06-15T22:55:00Z,true
+2024-06-15,New York Mets,Atlanta Braves,draftkings,totals,Over,1.95,8.5,2024-06-15T12:00:00+00:00,
+2024-06-19,New York Mets,Atlanta Braves,pinnacle,h2h,New York Mets,2.10,,2024-06-19T12:00:00Z,false
