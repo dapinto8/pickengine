@@ -245,7 +245,45 @@ def test_closing_capture_gap_metric_and_stale_warning(engine: Engine) -> None:
         report = evaluate_run(session, "gaprun", d1, d1, timedelta(hours=4))
         assert report["closing_capture"]["median_gap_minutes"] == pytest.approx(180.0)
         assert report["closing_capture"]["stale"] is True
-        assert "WARNING" in render_report(report)
+        rendered = render_report(report)
+        assert "WARNING" in rendered
+        # The warning names the benign day-game case and the per-day
+        # breakdown renders one compact line per official date.
+        assert "day-game-heavy slate" in rendered
+        assert "2024-06-15: median 180 min (n=1)" in rendered
+
+
+def test_closing_capture_per_day_breakdown_isolates_day_game_slate(engine: Engine) -> None:
+    """Two days with healthy closing gaps plus one day-game day whose freshest
+    capture is hours old: the aggregate median stays healthy (no false
+    warning) while the per-day breakdown exposes the outlier day."""
+    d1, d2, d3 = date(2024, 6, 15), date(2024, 6, 16), date(2024, 6, 17)
+    with session_scope(engine) as session:
+        seed_day(session, 1, d1, 5, 3)  # closes 10 min before first pitch
+        seed_day(session, 2, d2, 5, 3)  # closes 10 min before first pitch
+        day_game = seed_day(session, 3, d3, 5, 3)
+        run_backtest(session, d1, d3, run_id="daybrk", write_meta=False)
+        # Day-game slate: the freshest capture that day was ~3h05m pre-pitch.
+        for snap in session.scalars(
+            select(OddsSnapshot).where(
+                OddsSnapshot.game_id == day_game.id, OddsSnapshot.is_closing
+            )
+        ):
+            snap.captured_at_utc = first_pitch(d3) - timedelta(minutes=185)
+
+    with session_scope(engine) as session:
+        report = evaluate_run(session, "daybrk", d1, d3, timedelta(hours=4))
+    capture = report["closing_capture"]
+    assert capture["n"] == 3
+    assert capture["median_gap_minutes"] == pytest.approx(10.0)  # healthy aggregate
+    assert capture["stale"] is False  # no false alarm from one day-game day
+    assert capture["by_day"] == [
+        {"date": "2024-06-15", "n": 1, "median_gap_minutes": 10.0},
+        {"date": "2024-06-16", "n": 1, "median_gap_minutes": 10.0},
+        {"date": "2024-06-17", "n": 1, "median_gap_minutes": 185.0},
+    ]
+    # Not stale -> the per-day lines stay out of the rendered report.
+    assert "2024-06-17: median 185 min" not in render_report(report)
 
 
 def test_evaluate_run_report(engine: Engine) -> None:

@@ -89,8 +89,8 @@ def capture_odds_cmd() -> None:
     (one API request) and safe to run many times a day. Repeated intra-day
     captures are what make paper CLV real: without them the closing line
     would just be the pick-time snapshot re-flagged, and CLV would be 0 by
-    construction. Cron runs this at 18:00, 22:00, and 00:30 UTC on top of
-    the 14:00 pull inside `daily` (see scripts/cron.sh).
+    construction. Cron runs this at 16:30, 18:00, 22:00, and 00:30 UTC on
+    top of the 14:00 pull inside `daily` (see scripts/cron.sh).
     """
     from datetime import UTC, datetime
 

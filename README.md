@@ -44,7 +44,7 @@ Two commands drive live paper trading, designed for cron on a small VPS:
 
 - `pickengine daily` (14:00 UTC) — sync schedule + pitcher snapshots, pull live
   odds (needs `ODDS_API_KEY`), generate paper picks, print the card.
-- `pickengine capture-odds` (18:00, 22:00, 00:30 UTC) — odds-only snapshot
+- `pickengine capture-odds` (16:30, 18:00, 22:00, 00:30 UTC) — odds-only snapshot
   pulls closer to first pitch, so closing lines are real market closes rather
   than the pick-time snapshot re-flagged (without them paper CLV is 0 by
   construction).

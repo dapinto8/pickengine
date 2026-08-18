@@ -93,18 +93,21 @@ in `scripts/cron.sh`):
   print the running paper report
 - 14:00 `daily` — sync schedule + pitcher snapshots, pull odds, generate and
   print paper picks
-- 18:00, 22:00, 00:30 `capture-odds` — odds-only snapshot pulls (no sync, no
+- 16:30, 18:00, 22:00, 00:30 `capture-odds` — odds-only snapshot pulls (no sync, no
   picks)
 
 The capture-odds passes exist for CLV integrity: with only the 14:00 pull,
 `mark_closing_lines` would flag the very snapshot the picks were priced from
 as the closing line, making paper CLV 0 by construction and the go/no-go gate
-(avg CLV >= +1.5%) unevaluable. The three extra captures cover afternoon
-games, evening ET starts, and west coast starts. API budget: 4 pulls/day *
-~30 days ≈ 120 requests/month against The Odds API free tier's 500; a paid
-tier would allow tighter pre-game captures. The evaluation report tracks the
-median gap between closing captures and first pitch and prints a WARNING when
-it exceeds 120 minutes (stale closes = degraded CLV quality).
+(avg CLV >= +1.5%) unevaluable. The four extra captures cover early day games
+(16:30 — Sunday 13:05 ET starts), later afternoon games, evening ET starts,
+and west coast starts. API budget: 5 pulls/day * ~30 days ≈ 150 requests/month
+against The Odds API free tier's 500; a paid tier would allow tighter pre-game
+captures. The evaluation report tracks the median gap between closing captures
+and first pitch — aggregate plus a per-official-date breakdown — and prints a
+WARNING when the aggregate median exceeds 120 minutes (stale closes = degraded
+CLV quality); a day-game-heavy slate can trip it benignly, which is what the
+per-day breakdown is for.
 
 ## Commands
 

@@ -186,11 +186,22 @@ def _build_report(
     if gaps:
         # Round before comparing so the stored flag can never contradict the
         # stored number (a raw median of 120.04 must not print "120" + WARNING).
-        median_gap = round(median(gaps), 1)
+        median_gap = round(median(g for _, g in gaps), 1)
+        gaps_by_day: dict[date, list[float]] = defaultdict(list)
+        for official, gap in gaps:
+            gaps_by_day[official].append(gap)
         closing_capture = {
             "n": len(gaps),
             "median_gap_minutes": median_gap,
             "stale": median_gap > STALE_CLOSING_GAP_MINUTES,
+            "by_day": [
+                {
+                    "date": official.isoformat(),
+                    "n": len(day_gaps),
+                    "median_gap_minutes": round(median(day_gaps), 1),
+                }
+                for official, day_gaps in sorted(gaps_by_day.items())
+            ],
         }
 
     pairs, with_market = _model_predictions(session, start, end, decision_lead, config)
@@ -239,32 +250,36 @@ def _build_report(
     }
 
 
-def _closing_gap_minutes(session: Session, picks: list[Pick]) -> list[float]:
-    """Minutes between each settled pick's closing capture and first pitch.
+def _closing_gap_minutes(session: Session, picks: list[Pick]) -> list[tuple[date, float]]:
+    """(official date, minutes between closing capture and first pitch) per
+    settled pick.
 
     Re-resolves the closing snapshot the same way settlement did
     (selection._closing_snapshot); picks without closing odds, a resolvable
-    snapshot, or a known first pitch contribute nothing.
+    snapshot, or a known first pitch contribute nothing. The official date
+    rides along so the report can break the gaps down per day — a day-game
+    slate legitimately closes on an earlier capture than a night slate.
     """
     settled = [p for p in picks if p.closing_decimal_odds is not None]
     if not settled:
         return []
-    first_pitch = dict(
-        session.execute(
-            select(Game.id, Game.first_pitch_utc).where(
+    games = {
+        game_id: (official, fp)
+        for game_id, official, fp in session.execute(
+            select(Game.id, Game.official_date, Game.first_pitch_utc).where(
                 Game.id.in_({p.game_id for p in settled})
             )
-        ).all()
-    )
+        )
+    }
     gaps = []
     for pick in settled:
-        fp = first_pitch.get(pick.game_id)
+        official, fp = games.get(pick.game_id, (None, None))
         if fp is None:
             continue
         snapshot = _closing_snapshot(session, pick)
         if snapshot is None:
             continue
-        gaps.append((fp - snapshot.captured_at_utc).total_seconds() / 60)
+        gaps.append((official, (fp - snapshot.captured_at_utc).total_seconds() / 60))
     return gaps
 
 
@@ -336,8 +351,16 @@ def render_report(report: dict) -> str:
                 f"WARNING: closing captures are stale (median gap > "
                 f"{STALE_CLOSING_GAP_MINUTES:g} min before first pitch) — CLV quality is "
                 "degraded; the closing line may just be the pick-time snapshot "
-                "re-flagged. Check that the capture-odds cron passes are running.",
+                "re-flagged. Check that the capture-odds cron passes are running. "
+                "Note: a day-game-heavy slate (early afternoon starts) can also "
+                "produce a large median gap with a healthy cron — compare against "
+                "the per-day breakdown below before assuming captures are broken.",
             ]
+            for day in capture.get("by_day", []):
+                lines.append(
+                    f"  {day['date']}: median {day['median_gap_minutes']:g} min "
+                    f"(n={day['n']})"
+                )
 
     model = report["model"]
     lines += [
