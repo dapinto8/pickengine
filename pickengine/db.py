@@ -11,12 +11,22 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import Engine, create_engine, event
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from pickengine.models import Base
 
 DEFAULT_DB_PATH = "./pickengine.db"
 _MEMORY = ":memory:"
+
+# Bumped on breaking schema changes that are NOT auto-migrated.
+# v2: games.date_utc (UTC calendar date) renamed to games.official_date
+#     (MLB's official local date) — a semantic change, so old rows are wrong,
+#     not just misnamed; the DB must be rebuilt from source data. The
+#     uq_odds_snapshot_key unique index (odds dedup for ON CONFLICT inserts)
+#     rides the same drop-and-rebuild — one version bump covers both; on
+#     already-rebuilt v2 files _migrate adds the index in place.
+SCHEMA_VERSION = 2
 
 
 def resolve_db_path() -> str:
@@ -76,6 +86,35 @@ def _migrate(engine: Engine) -> None:
     must be ALTERed in here. Keep entries append-only.
     """
     with engine.begin() as conn:
+        game_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(games)")}
+        if "date_utc" in game_columns:
+            raise RuntimeError(
+                f"this database predates schema version {SCHEMA_VERSION}: games.date_utc "
+                "was replaced by games.official_date (MLB's official local date), and the "
+                "old UTC-derived values are semantically wrong for late games. Delete the "
+                "DB file and rebuild: pickengine initdb, then sync-teams / sync-schedule / "
+                "sync-pitchers (and re-import odds)."
+            )
         pick_columns = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(picks)")}
         if "run_id" not in pick_columns:
             conn.exec_driver_sql("ALTER TABLE picks ADD COLUMN run_id VARCHAR(32)")
+        # create_all does not add indexes to pre-existing tables. Keep this
+        # DDL in sync with uq_odds_snapshot_key in models.OddsSnapshot.
+        # (Deliberately raw, not generated from the model Index: SQLite
+        # cannot reflect expression indexes, so index.create(checkfirst=True)
+        # raises "already exists" on every run after the first.)
+        try:
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_odds_snapshot_key ON odds_snapshots "
+                "(game_id, book, market, outcome_label, captured_at_utc, "
+                "coalesce(line_value, -1e9))"
+            )
+        except IntegrityError as exc:
+            # Without the guard this bricks EVERY command (they all call
+            # create_schema first) with a bare UNIQUE-constraint error.
+            raise RuntimeError(
+                "cannot create the odds dedup index uq_odds_snapshot_key: "
+                "odds_snapshots already contains duplicate rows (same game/book/"
+                "market/outcome/line/captured_at). Delete the duplicates keeping one "
+                "row per key, or rebuild the DB from source data, then rerun."
+            ) from exc

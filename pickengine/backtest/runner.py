@@ -13,9 +13,12 @@ simulating when we would realistically publish.
 Guard rails:
 - `_assert_pick_integrity` re-verifies, for every pick created, that each
   input carried a timestamp strictly before use: decision time before first
-  pitch, the priced quote captured strictly before decision time, starter
-  snapshots dated no later than both game date and decision date, and the
-  Elo update actually used available strictly before decision time. Any
+  pitch, the priced quote captured strictly before decision time, the
+  starter snapshot the prediction would use checked against an INDEPENDENT
+  raw query (the helper's choice must equal the latest snapshot dated at or
+  before min(official date, decision date) — re-checking the helper's own
+  filter would be tautological), and the Elo update actually used available
+  strictly before decision time. Any
   violation raises RuntimeError — the run does not continue on leaked data.
 - Every run is tagged with a run_id (uuid) stored on its picks, so parameter
   sweeps never collide; `pickengine clear-backtest --run-id X` deletes one
@@ -30,14 +33,14 @@ from dataclasses import asdict
 from datetime import date, timedelta
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from pickengine.config import Config
 from pickengine.engine.elo import EloRatings
-from pickengine.engine.probability import _starter_snapshot
+from pickengine.engine.probability import starter_snapshot
 from pickengine.engine.selection import generate_picks, settle_picks
-from pickengine.models import Game, GameStatus, OddsSnapshot, Phase, Pick
+from pickengine.models import Game, GameStatus, OddsSnapshot, Phase, Pick, PitcherStatsSnapshot
 
 DEFAULT_DECISION_LEAD = timedelta(hours=4)
 REPORTS_DIR = Path("./reports")
@@ -53,7 +56,8 @@ def run_backtest(
     elo: EloRatings | None = None,
     write_meta: bool = True,
 ) -> dict:
-    """Replay [start, end] day by day. Returns a summary dict (incl. run_id).
+    """Replay [start, end] day by day (MLB official dates). Returns a
+    summary dict (incl. run_id).
 
     `config` supplies tunable parameters (defaults otherwise); `elo` lets a
     caller reuse a prebuilt EloRatings (its k must match config.elo_k — the
@@ -78,7 +82,7 @@ def run_backtest(
         picks = generate_picks(
             session, elo, day, Phase.BACKTEST, decision_lead=decision_lead, run_id=run_id,
             min_ev=config.min_ev, blend_weight=config.blend_weight_model,
-            elo_per_fip=config.elo_per_fip,
+            elo_per_fip=config.elo_per_fip, devig_method=config.devig_method,
         )
         for pick in picks:
             _assert_pick_integrity(session, elo, pick)
@@ -136,12 +140,32 @@ def _assert_pick_integrity(session: Session, elo: EloRatings, pick: Pick) -> Non
             f"no snapshot at {pick.book} {pick.decimal_odds_at_pick} captured before {decision}"
         )
 
+    cutoff = min(game.official_date, decision.date())
     for starter_id in (game.home_starter_player_id, game.away_starter_player_id):
-        snapshot = _starter_snapshot(session, starter_id, game.date_utc, decision)
-        if snapshot is not None and (
-            snapshot.as_of_date > game.date_utc or snapshot.as_of_date > decision.date()
-        ):
-            raise violation(f"pitcher snapshot dated {snapshot.as_of_date} used at {decision}")
+        if starter_id is None:
+            continue
+        chosen = starter_snapshot(session, starter_id, game.official_date, decision)
+        # Independent oracle: a raw aggregate, deliberately NOT reusing the
+        # helper — re-running starter_snapshot and re-checking its own filter
+        # would be tautological and could never catch a broken helper. The
+        # latest snapshot legally usable at decision time is the one with the
+        # max as_of_date at or before the cutoff; the helper must agree
+        # exactly (this single equality also catches a helper that returns a
+        # snapshot dated after the cutoff, since the oracle never can).
+        allowed_date = session.scalar(
+            select(func.max(PitcherStatsSnapshot.as_of_date)).where(
+                PitcherStatsSnapshot.player_id == starter_id,
+                PitcherStatsSnapshot.as_of_date <= cutoff,
+            )
+        )
+        chosen_date = chosen.as_of_date if chosen is not None else None
+        if chosen_date != allowed_date:
+            raise violation(
+                f"pitcher snapshot mismatch for player {starter_id}: "
+                f"starter_snapshot chose {chosen_date} at decision {decision} "
+                f"but the latest snapshot at or before cutoff {cutoff} is "
+                f"{allowed_date}"
+            )
 
     for team_id in (game.home_team_id, game.away_team_id):
         last_update = elo.last_update_time(team_id, decision)

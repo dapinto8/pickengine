@@ -19,13 +19,22 @@ def test_config_defaults_match_code_constants() -> None:
     assert config.elo_per_fip == 40.0
     assert config.blend_weight_model == 0.3
     assert config.min_ev == 0.04
+    assert config.devig_method == "multiplicative"
 
 
 def test_config_save_load_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "pickengine.toml"
-    original = Config(elo_k=5.0, elo_per_fip=25.0, blend_weight_model=0.2, min_ev=0.05)
+    original = Config(
+        elo_k=5.0, elo_per_fip=25.0, blend_weight_model=0.2, min_ev=0.05,
+        devig_method="power",
+    )
     save_config(original, path)
     assert load_config(path) == original
+
+
+def test_config_invalid_devig_method_fails_loudly() -> None:
+    with pytest.raises(ValueError, match="devig_method"):
+        Config(devig_method="proportional")
 
 
 def test_config_missing_file_gives_defaults(tmp_path: Path) -> None:

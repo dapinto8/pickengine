@@ -245,11 +245,19 @@ def _upsert_game(
         if probable is None and status is not GameStatus.POSTPONED:
             counts["missing_probables"] += 1
 
+    # MLB's officialDate is the game's identity date (see Game docstring).
+    # It is present on every schedule payload; never fall back to deriving a
+    # date from the UTC first pitch — that is exactly the late-game bug.
+    official_raw = raw.get("officialDate")
+    if not official_raw:
+        raise ValueError(f"schedule payload for gamePk {raw['gamePk']} has no officialDate")
+    official_date = date.fromisoformat(official_raw)
+
     game = games_by_pk.get(raw["gamePk"])
     if game is None:
         game = Game(
             mlb_game_pk=raw["gamePk"],
-            date_utc=first_pitch.date(),
+            official_date=official_date,
             season=int(raw["season"]),
             game_type=game_type,
             home_team_id=team_id_by_mlb[home_raw["team"]["id"]],
@@ -258,7 +266,7 @@ def _upsert_game(
         )
         session.add(game)
         games_by_pk[raw["gamePk"]] = game
-    game.date_utc = first_pitch.date()
+    game.official_date = official_date
     game.season = int(raw["season"])
     game.game_type = game_type
     game.home_team_id = team_id_by_mlb[home_raw["team"]["id"]]
@@ -287,7 +295,9 @@ def _date_chunks(start: date, end: date, days: int) -> list[tuple[date, date]]:
 
 def _relevant_pitcher_ids(session: Session, as_of_date: date) -> set[int]:
     """Pitchers who are probable starters in [as_of, as_of+2] or started in
-    [as_of-30, as_of)."""
+    [as_of-30, as_of). All comparisons are on official dates: as_of_date,
+    Game.official_date, and the gameLog split dates that snapshots aggregate
+    share the same (official) date basis."""
     ids: set[int] = set()
     for lo, hi in (
         (as_of_date, as_of_date + timedelta(days=2)),
@@ -295,8 +305,8 @@ def _relevant_pitcher_ids(session: Session, as_of_date: date) -> set[int]:
     ):
         rows = session.execute(
             select(Game.home_starter_player_id, Game.away_starter_player_id).where(
-                Game.date_utc >= lo,
-                Game.date_utc <= hi,
+                Game.official_date >= lo,
+                Game.official_date <= hi,
                 or_(
                     Game.home_starter_player_id.is_not(None),
                     Game.away_starter_player_id.is_not(None),
@@ -315,10 +325,12 @@ def sync_pitcher_snapshots(
 
     A snapshot aggregates the pitcher's game log for season == as_of_date.year,
     including ONLY games dated strictly before as_of_date (see module
-    docstring for why game logs, not season totals). `ip` is stored as true
-    decimal innings (outs / 3). `xfip_proxy` stays None until we ingest
-    batted-ball data. Pitchers with no appearances before as_of_date in the
-    season are skipped.
+    docstring for why game logs, not season totals). The date basis is
+    official dates end to end: as_of_date, the gameLog split dates compared
+    against it, and Game.official_date used to find relevant pitchers are all
+    MLB official dates. `ip` is stored as true decimal innings (outs / 3).
+    `xfip_proxy` stays None until we ingest batted-ball data. Pitchers with
+    no appearances before as_of_date in the season are skipped.
 
     Returns counts: snapshots written and pitchers skipped for lack of data.
     """

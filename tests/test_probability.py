@@ -1,14 +1,16 @@
 """Tests for the combined probability layer."""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import Engine
 
 from pickengine.db import create_schema, get_engine, session_scope
+from pickengine.engine.devig import remove_vig_multiplicative, remove_vig_power
 from pickengine.engine.elo import EloRatings
 from pickengine.engine.probability import (
     blend,
+    latest_h2h_quotes,
     market_home_probability,
     model_home_probability,
     predict_game,
@@ -72,6 +74,101 @@ def test_market_probability_uses_latest_quote_per_book() -> None:
     assert p == pytest.approx(0.5)
 
 
+def test_market_probability_devig_method_power() -> None:
+    """method="power" applies the power devig; on an asymmetric vigged pair
+    it differs measurably from the multiplicative result."""
+    t = datetime(2024, 6, 15, 20, 0)
+    snaps = [
+        h2h("pinnacle", "New York Mets", 1.40, t),
+        h2h("pinnacle", "Atlanta Braves", 3.10, t),
+    ]
+    p_power, source = market_home_probability(
+        snaps, "New York Mets", "Atlanta Braves", method="power"
+    )
+    assert source == "pinnacle"
+    assert p_power == pytest.approx(remove_vig_power([1.40, 3.10])[0])
+    p_mult, _ = market_home_probability(snaps, "New York Mets", "Atlanta Braves")
+    assert p_mult == pytest.approx(remove_vig_multiplicative([1.40, 3.10])[0])
+    # Power shrinks the longshot more, so the favorite keeps a higher p.
+    assert p_power > p_mult
+
+    with pytest.raises(ValueError, match="unknown devig method"):
+        market_home_probability(snaps, "New York Mets", "Atlanta Braves", method="nope")
+
+
+def test_market_probability_uses_later_complete_capture_when_line_moved() -> None:
+    """Two complete captures from one book with a moved line: the later
+    capture's pair is the one de-vigged."""
+    t1, t2 = datetime(2024, 6, 15, 12, 0), datetime(2024, 6, 15, 22, 0)
+    snaps = [
+        h2h("pinnacle", "New York Mets", 2.20, t1),
+        h2h("pinnacle", "Atlanta Braves", 1.70, t1),
+        h2h("pinnacle", "New York Mets", 1.91, t2),
+        h2h("pinnacle", "Atlanta Braves", 1.91, t2),
+    ]
+    p, source = market_home_probability(snaps, "New York Mets", "Atlanta Braves")
+    assert source == "pinnacle"
+    assert p == pytest.approx(0.5)
+
+
+def test_market_probability_never_mixes_capture_times() -> None:
+    """A later capture with only one side must NOT be paired with the other
+    side from an earlier capture — those prices never coexisted. The complete
+    earlier pair is used instead."""
+    t1, t2 = datetime(2024, 6, 15, 12, 0), datetime(2024, 6, 15, 22, 0)
+    snaps = [
+        h2h("pinnacle", "New York Mets", 2.50, t1),
+        h2h("pinnacle", "Atlanta Braves", 1.55, t1),
+        h2h("pinnacle", "New York Mets", 1.91, t2),  # moved, away side not captured
+    ]
+    p, _ = market_home_probability(snaps, "New York Mets", "Atlanta Braves")
+    # The t1 pair, not (1.91 @ t2, 1.55 @ t1) which would be ~0.44.
+    assert p == pytest.approx(remove_vig_multiplicative([2.50, 1.55])[0])
+
+
+def test_capture_pairing_tolerates_timestamp_jitter() -> None:
+    """Archives often scrape a book's two sides seconds apart; quotes within
+    H2H_PAIR_TOLERANCE pair as one capture instead of voiding the book (and
+    with it the whole market)."""
+    t = datetime(2024, 6, 15, 20, 0)
+    snaps = [
+        h2h("pinnacle", "New York Mets", 1.91, t),
+        h2h("pinnacle", "Atlanta Braves", 1.91, t + timedelta(seconds=2)),
+    ]
+    p, source = market_home_probability(snaps, "New York Mets", "Atlanta Braves")
+    assert source == "pinnacle"
+    assert p == pytest.approx(0.5)
+
+
+def test_one_sided_book_contributes_nothing() -> None:
+    """A book that never quotes both sides in one capture yields no market."""
+    snaps = [
+        h2h("betmgm", "New York Mets", 2.10, datetime(2024, 6, 15, 12, 0)),
+        h2h("betmgm", "New York Mets", 2.05, datetime(2024, 6, 15, 22, 0)),
+    ]
+    assert market_home_probability(snaps, "New York Mets", "Atlanta Braves") is None
+
+
+def test_latest_h2h_quotes_pairs_share_capture_time() -> None:
+    """Every book's contributed quotes come from a single captured_at_utc,
+    even when the per-outcome latest quotes span captures."""
+    t1, t2, t3 = (datetime(2024, 6, 15, h, 0) for h in (12, 18, 22))
+    snaps = [
+        h2h("pinnacle", "New York Mets", 2.20, t1),
+        h2h("pinnacle", "Atlanta Braves", 1.70, t1),
+        h2h("pinnacle", "Atlanta Braves", 1.80, t2),  # away-only capture
+        h2h("betmgm", "New York Mets", 2.10, t2),
+        h2h("betmgm", "Atlanta Braves", 1.75, t2),
+        h2h("betmgm", "New York Mets", 2.15, t3),  # home-only capture
+    ]
+    quotes = latest_h2h_quotes(snaps)
+    by_book: dict[str, set[datetime]] = {}
+    for (book, _), snap in quotes.items():
+        by_book.setdefault(book, set()).add(snap.captured_at_utc)
+    assert by_book == {"pinnacle": {t1}, "betmgm": {t2}}  # one capture each
+    assert len(quotes) == 4  # both sides for both books
+
+
 def test_market_probability_median_fallback_and_none() -> None:
     t = datetime(2024, 6, 15, 20, 0)
     snaps = [
@@ -101,7 +198,7 @@ def engine() -> Engine:
         session.flush()
         session.add(
             Game(
-                id=1, mlb_game_pk=745900, date_utc=date(2024, 6, 15), season=2024,
+                id=1, mlb_game_pk=745900, official_date=date(2024, 6, 15), season=2024,
                 game_type=GameType.REGULAR, home_team_id=mets.id, away_team_id=braves.id,
                 home_starter_player_id=starter.id, away_starter_player_id=None,
                 status=GameStatus.SCHEDULED, first_pitch_utc=FIRST_PITCH,

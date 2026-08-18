@@ -36,7 +36,11 @@ every feature, every backtest, every query. No exceptions.
 - **pytest** for tests. Every module gets tests. Deterministic seeds everywhere
   randomness exists.
 - Timezone discipline: all timestamps stored in **UTC**, game times converted explicitly.
-  Venezuela is UTC-4, but storage is UTC only.
+  Venezuela is UTC-4, but storage is UTC only. One deliberate exception:
+  `Game.official_date` (and the pitcher snapshot dates on the same basis) is MLB's
+  official LOCAL calendar date, used for identity/grouping only — never derive it from
+  a UTC timestamp, and use only `first_pitch_utc` for time-ordering and lookahead
+  checks (see `models.py`).
 - Type hints everywhere, **ruff** for linting
 
 ## Coding style
@@ -72,12 +76,38 @@ tests/
 
 ## Configuration
 
-Tunable model parameters (elo_k, elo_per_fip, blend_weight_model, min_ev) live in
+Tunable model parameters (elo_k, elo_per_fip, blend_weight_model, min_ev,
+devig_method) live in
 `pickengine.toml` at the repo root, written by `pickengine tune` and loaded by the
 pipeline CLI commands (see `pickengine/config.py`). Code constants are the defaults
 when the file is absent; never hand-edit code constants to tune — use the config file.
 Tuning uses a strict time-based 70/30 split; the holdout result may be looked at once
 per major model change.
+
+## Operations (paper trading)
+
+Cron on a small VPS drives the paper loop (times UTC, wrapper + crontab lines
+in `scripts/cron.sh`):
+
+- 12:00 `daily-settle` — sync finals, mark closing lines, settle paper picks,
+  print the running paper report
+- 14:00 `daily` — sync schedule + pitcher snapshots, pull odds, generate and
+  print paper picks
+- 16:30, 18:00, 22:00, 00:30 `capture-odds` — odds-only snapshot pulls (no sync, no
+  picks)
+
+The capture-odds passes exist for CLV integrity: with only the 14:00 pull,
+`mark_closing_lines` would flag the very snapshot the picks were priced from
+as the closing line, making paper CLV 0 by construction and the go/no-go gate
+(avg CLV >= +1.5%) unevaluable. The four extra captures cover early day games
+(16:30 — Sunday 13:05 ET starts), later afternoon games, evening ET starts,
+and west coast starts. API budget: 5 pulls/day * ~30 days ≈ 150 requests/month
+against The Odds API free tier's 500; a paid tier would allow tighter pre-game
+captures. The evaluation report tracks the median gap between closing captures
+and first pitch — aggregate plus a per-official-date breakdown — and prints a
+WARNING when the aggregate median exceeds 120 minutes (stale closes = degraded
+CLV quality); a day-game-heavy slate can trip it benignly, which is what the
+per-day breakdown is for.
 
 ## Commands
 

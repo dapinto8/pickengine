@@ -81,9 +81,17 @@ def sync_schedule_cmd(
     )
 
 
-@app.command("pull-odds")
-def pull_odds_cmd() -> None:
-    """Pull current MLB odds (h2h, totals, runline) from The Odds API."""
+@app.command("capture-odds")
+def capture_odds_cmd() -> None:
+    """Pull current MLB odds (h2h, totals, runline) and store the snapshots.
+
+    Does nothing else — no schedule sync, no pick generation — so it is cheap
+    (one API request) and safe to run many times a day. Repeated intra-day
+    captures are what make paper CLV real: without them the closing line
+    would just be the pick-time snapshot re-flagged, and CLV would be 0 by
+    construction. Cron runs this at 16:30, 18:00, 22:00, and 00:30 UTC on
+    top of the 14:00 pull inside `daily` (see scripts/cron.sh).
+    """
     from datetime import UTC, datetime
 
     from pickengine.db import create_schema, get_engine, session_scope
@@ -111,6 +119,16 @@ def import_odds_cmd(
     with session_scope(engine) as session:
         counts = import_odds_file(session, path)
     typer.echo(_odds_counts_line(counts))
+    if counts["ambiguous_doubleheader"]:
+        typer.echo(
+            "Note: doubleheader rows are recoverable — add an optional commence_time "
+            "column (scheduled start, ISO-8601) to the dataset and re-import."
+        )
+    if counts["inserted"]:
+        typer.echo(
+            "Note: the daily cron only re-derives closing flags for the last two days — "
+            "run `pickengine mark-closing` to flag closing lines for imported dates."
+        )
 
 
 @app.command("mark-closing")
@@ -131,14 +149,15 @@ def _odds_counts_line(counts: dict[str, int]) -> str:
         f"Inserted {counts['inserted']} odds snapshots "
         f"({counts['duplicates']} duplicates, {counts['unmatched_team']} unmatched teams, "
         f"{counts['unmatched_game']} unmatched games, "
-        f"{counts['ambiguous_game']} ambiguous doubleheaders, "
+        f"{counts['ambiguous_game']} ambiguous games, "
+        f"{counts['ambiguous_doubleheader']} doubleheader rows without commence_time, "
         f"{counts['skipped_market']} skipped markets)"
     )
 
 
 @app.command("generate-picks")
 def generate_picks_cmd(
-    date_str: str = typer.Option(..., "--date", help="Pick date, YYYY-MM-DD (UTC)"),
+    date_str: str = typer.Option(..., "--date", help="Pick date, YYYY-MM-DD (MLB official date)"),
     phase: str = typer.Option("paper", help="backtest | paper | live"),
 ) -> None:
     """Generate, persist, and print the day's picks (h2h only for now)."""
@@ -167,7 +186,7 @@ def generate_picks_cmd(
         picks = generate_picks(
             session, EloRatings(finals, k=config.elo_k), target_date, phase_enum, as_of,
             min_ev=config.min_ev, blend_weight=config.blend_weight_model,
-            elo_per_fip=config.elo_per_fip,
+            elo_per_fip=config.elo_per_fip, devig_method=config.devig_method,
         )
         _print_pick_card(session, picks, f"{target_date} (phase={phase_enum.value})")
 
@@ -199,7 +218,9 @@ def _print_pick_card(session, picks: list, label: str) -> None:
 
 @app.command()
 def settle(
-    date_str: str = typer.Option(..., "--date", help="Game date to settle, YYYY-MM-DD (UTC)"),
+    date_str: str = typer.Option(
+        ..., "--date", help="Game date to settle, YYYY-MM-DD (MLB official date)"
+    ),
 ) -> None:
     """Resolve pending picks for a date and fill closing odds + CLV."""
     from datetime import date
@@ -322,9 +343,13 @@ def tune(
 def daily() -> None:
     """Morning paper-trading pipeline (cron at 14:00 UTC).
 
-    Syncs the schedule for today and tomorrow (UTC — US night games roll past
-    midnight UTC), builds pitcher snapshots as of today, pulls live odds, and
-    generates paper picks for both UTC dates, printing the card. Live syncs
+    Syncs the schedule for today and tomorrow, builds pitcher snapshots as of
+    today, pulls live odds, and generates paper picks for both dates,
+    printing the card. Dates are MLB official dates; generating for (today,
+    tomorrow) still covers everything because official dates lag UTC dates,
+    never lead them — at 14:00 UTC every game yet to start today or tonight
+    carries official date today or tomorrow. Whether a game can still be bet
+    is judged only against first_pitch_utc (in generate_picks). Live syncs
     bypass the API file cache so nothing stale leaks in.
     """
     from datetime import UTC, datetime, timedelta
@@ -372,7 +397,7 @@ def daily() -> None:
                 session, elo, day, Phase.PAPER,
                 datetime.now(UTC).replace(tzinfo=None),
                 min_ev=config.min_ev, blend_weight=config.blend_weight_model,
-                elo_per_fip=config.elo_per_fip,
+                elo_per_fip=config.elo_per_fip, devig_method=config.devig_method,
             )
         _print_pick_card(session, picks, f"{today} + {tomorrow} (phase=paper)")
 
@@ -381,9 +406,12 @@ def daily() -> None:
 def daily_settle() -> None:
     """Morning-after pipeline (cron at 12:00 UTC).
 
-    Syncs finals for the last two UTC dates, marks closing lines, settles
-    paper picks for those dates (two days back catches UTC-rollover games and
-    late finals), and prints the running paper-trading report.
+    Syncs finals for the last two days, marks closing lines, settles paper
+    picks for those dates, and prints the running paper-trading report.
+    Dates are MLB official dates (official dates lag UTC, never lead, so at
+    12:00 UTC yesterday's official slate — including night games that ended
+    past midnight UTC — is fully final); sweeping two days back also catches
+    late finals and previously postponed settlements.
     """
     from datetime import UTC, datetime, timedelta
 
@@ -406,7 +434,7 @@ def daily_settle() -> None:
     typer.echo(f"Finals synced: {counts['games']} games ({counts['postponed']} postponed)")
 
     with session_scope(engine) as session:
-        marked = mark_closing_lines(session)
+        marked = mark_closing_lines(session, day_2, day_1)
     typer.echo(f"Closing lines flagged: {marked}")
 
     with session_scope(engine) as session:

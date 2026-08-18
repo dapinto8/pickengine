@@ -38,7 +38,7 @@ def test_round_trip_all_tables(engine: Engine) -> None:
 
         game = Game(
             mlb_game_pk=745123,
-            date_utc=date(2024, 6, 15),
+            official_date=date(2024, 6, 15),
             season=2024,
             game_type=GameType.REGULAR,
             home_team_id=home.id,

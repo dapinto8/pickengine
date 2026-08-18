@@ -33,7 +33,7 @@ from pickengine.backtest.runner import (
     clear_backtest_run,
     run_backtest,
 )
-from pickengine.config import DEFAULT_CONFIG_PATH, Config, save_config
+from pickengine.config import DEFAULT_CONFIG_PATH, Config, load_config, save_config
 from pickengine.engine.elo import EloRatings
 from pickengine.models import Game, GameStatus, OddsSnapshot, Pick
 
@@ -43,6 +43,13 @@ GRID = {
     "blend_weight_model": [0.2, 0.3, 0.4, 0.5],
     "min_ev": [0.03, 0.04, 0.05, 0.06],
 }
+# Config.devig_method ("multiplicative" | "power") is deliberately NOT in the
+# grid: it is already 192 combos, and the methods only differ against real
+# market prices — the power method's whole point is the favorite-longshot
+# bias observed in actual closing lines. Add it to the grid once historical
+# odds are loaded; until then every combo carries the method from the
+# existing pickengine.toml (default when absent), and save_config writes that
+# same value back — a tune run never silently reverts an operator's choice.
 
 TUNE_FRACTION = 0.7
 
@@ -78,7 +85,7 @@ def run_tuning(
         select(func.count())
         .select_from(OddsSnapshot)
         .join(Game, OddsSnapshot.game_id == Game.id)
-        .where(Game.date_utc >= start, Game.date_utc <= tune_end)
+        .where(Game.official_date >= start, Game.official_date <= tune_end)
     )
     if not odds_in_window:
         raise RuntimeError(
@@ -89,6 +96,10 @@ def run_tuning(
     finals = session.scalars(select(Game).where(Game.status == GameStatus.FINAL)).all()
     stamp = uuid.uuid4().hex[:8]
 
+    # Parameters outside the grid come from the existing config file so the
+    # tune run searches around — and writes back — the operator's settings.
+    devig_method = load_config(config_path).devig_method
+
     results = []
     combo_index = 0
     for k in GRID["elo_k"]:
@@ -97,7 +108,8 @@ def run_tuning(
             GRID["elo_per_fip"], GRID["blend_weight_model"], GRID["min_ev"]
         ):
             config = Config(
-                elo_k=k, elo_per_fip=fip, blend_weight_model=weight, min_ev=min_ev
+                elo_k=k, elo_per_fip=fip, blend_weight_model=weight, min_ev=min_ev,
+                devig_method=devig_method,
             )
             run_id = f"tn{stamp}{combo_index:03d}"
             combo_index += 1
@@ -193,7 +205,8 @@ def render_tuning_report(report: dict) -> str:
     lines += [
         "",
         f"Chosen: elo_k={chosen['elo_k']:g}  elo_per_fip={chosen['elo_per_fip']:g}  "
-        f"blend_weight_model={chosen['blend_weight_model']:g}  min_ev={chosen['min_ev']:g}",
+        f"blend_weight_model={chosen['blend_weight_model']:g}  min_ev={chosen['min_ev']:g}  "
+        f"devig_method={chosen['devig_method']} (not grid-searched)",
         f"Written to {report['config_written_to']}",
         "",
         window_line("TUNING ", report["tuning_result"]),

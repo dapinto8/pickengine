@@ -15,6 +15,7 @@ from pickengine.engine.selection import (
     generate_picks,
     settle_picks,
 )
+from pickengine.ingest.odds import mark_closing_lines
 from pickengine.models import (
     Game,
     GameStatus,
@@ -55,7 +56,7 @@ def engine() -> Engine:
 
 def make_game(session: Session, pk: int, first_pitch: datetime = FIRST_PITCH) -> Game:
     game = Game(
-        mlb_game_pk=pk, date_utc=DAY, season=2024, game_type=GameType.REGULAR,
+        mlb_game_pk=pk, official_date=DAY, season=2024, game_type=GameType.REGULAR,
         home_team_id=1, away_team_id=2, status=GameStatus.SCHEDULED,
         first_pitch_utc=first_pitch,
     )
@@ -77,18 +78,20 @@ def add_h2h(
 
 
 def add_market(session: Session, game_id: int, extra_home_odds: float | None = None) -> None:
-    """Fair 1.91/1.91 pinnacle market, optionally a softer home price elsewhere."""
+    """Fair 1.91/1.91 pinnacle market, optionally a softer home price at
+    betmgm (paired with an away quote — a book only contributes complete
+    same-capture pairs)."""
     add_h2h(session, game_id, "pinnacle", HOME, 1.91)
     add_h2h(session, game_id, "pinnacle", AWAY, 1.91)
     if extra_home_odds is not None:
         add_h2h(session, game_id, "betmgm", HOME, extra_home_odds)
+        add_h2h(session, game_id, "betmgm", AWAY, 1.80)
 
 
 def test_basic_pick_generation_and_fields(engine: Engine) -> None:
     with session_scope(engine) as session:
         game = make_game(session, 1)
         add_market(session, game.id, extra_home_odds=2.10)
-        add_h2h(session, game.id, "betmgm", AWAY, 1.80)
         picks = generate_picks(session, EloRatings([]), DAY, Phase.BACKTEST, AS_OF)
         assert len(picks) == 1
         p = picks[0]
@@ -105,12 +108,29 @@ def test_basic_pick_generation_and_fields(engine: Engine) -> None:
         assert p.phase is Phase.BACKTEST
 
 
+def test_pricing_uses_freshest_quote_not_stale_complete_pair(engine: Engine) -> None:
+    """A book whose newest usable capture is one-sided must be priced at that
+    fresh quote — never at the better price from an older complete pair the
+    book has since withdrawn (the de-vig, by contrast, keeps using complete
+    pairs only)."""
+    with session_scope(engine) as session:
+        game = make_game(session, 1)
+        add_market(session, game.id)  # pinnacle 1.91/1.91 market anchor
+        # Older complete betmgm pair with a juicy home price...
+        add_h2h(session, game.id, "betmgm", HOME, 2.50, at=QUOTED_AT - timedelta(hours=2))
+        add_h2h(session, game.id, "betmgm", AWAY, 1.55, at=QUOTED_AT - timedelta(hours=2))
+        # ...superseded by a one-sided capture at a worse (current) price.
+        add_h2h(session, game.id, "betmgm", HOME, 2.10, at=QUOTED_AT)
+        picks = generate_picks(session, EloRatings([]), DAY, Phase.BACKTEST, AS_OF)
+        assert len(picks) == 1
+        assert picks[0].decimal_odds_at_pick == 2.10  # not the withdrawn 2.50
+
+
 def test_ev_threshold_filters_out_thin_edges(engine: Engine) -> None:
     with session_scope(engine) as session:
         game = make_game(session, 1)
-        add_market(session, game.id)  # best home price 1.91 -> EV ~ -2.5%
-        # Just below threshold: 2.03 -> EV ~ +3.6%.
-        add_h2h(session, game.id, "betmgm", HOME, 2.03)
+        # Just below threshold: best home price 2.03 -> EV ~ +3.6% < 4%.
+        add_market(session, game.id, extra_home_odds=2.03)
         assert generate_picks(session, EloRatings([]), DAY, Phase.BACKTEST, AS_OF) == []
 
 
@@ -132,6 +152,8 @@ def test_no_two_picks_on_same_game(engine: Engine) -> None:
         add_market(session, game.id)
         # Cross-book arb: both sides clear MIN_EV, home side by more.
         add_h2h(session, game.id, "betmgm", HOME, 2.30)
+        add_h2h(session, game.id, "betmgm", AWAY, 1.60)
+        add_h2h(session, game.id, "caesars", HOME, 1.60)
         add_h2h(session, game.id, "caesars", AWAY, 2.30)
         picks = generate_picks(session, EloRatings([]), DAY, Phase.BACKTEST, AS_OF)
         assert len(picks) == 1
@@ -220,6 +242,48 @@ def test_settlement_outcomes_and_clv(engine: Engine) -> None:
         assert by_game[4].closing_decimal_odds is None
 
         assert by_game[5].status is PickStatus.PENDING
+
+
+def test_clv_settles_against_later_capture_not_pick_price(engine: Engine) -> None:
+    """A snapshot captured AFTER pick time but before first pitch becomes the
+    closing line, and CLV is nonzero when the line moved — the whole point of
+    the intra-day capture-odds passes. With only the pick-time snapshot,
+    mark_closing_lines would re-flag it and CLV would be 0 by construction."""
+    with session_scope(engine) as session:
+        game = make_game(session, 1)
+        game.status, game.home_score, game.away_score = GameStatus.FINAL, 5, 3
+        add_pick(session, game.id)  # priced at 2.10 on betmgm at AS_OF
+        add_h2h(session, game.id, "betmgm", HOME, 2.10, at=QUOTED_AT)  # pick-time capture
+        # Later capture-odds pass: the line moved to 2.00 by 40 min pre-pitch.
+        add_h2h(session, game.id, "betmgm", HOME, 2.00,
+                at=FIRST_PITCH - timedelta(minutes=40))
+        assert mark_closing_lines(session) == 1  # the 2.00, not the 2.10
+        assert settle_picks(session, DAY)["won"] == 1
+
+    with session_scope(engine) as session:
+        pick = session.scalars(select(Pick)).one()
+        assert pick.closing_decimal_odds == 2.00
+        assert pick.clv_pct == pytest.approx(5.0)  # 2.10/2.00 - 1: nonzero, beat close
+
+
+def test_settlement_ignores_post_first_pitch_closing_flags(engine: Engine) -> None:
+    """An imported archive can stamp is_closing on rows captured after first
+    pitch; settling CLV against such a price would leak the result into the
+    primary metric. The pick must settle with no closing line instead."""
+    with session_scope(engine) as session:
+        game = make_game(session, 1)
+        game.status, game.home_score, game.away_score = GameStatus.FINAL, 5, 3
+        add_pick(session, game.id)
+        add_h2h(session, game.id, "betmgm", HOME, 1.50,
+                at=FIRST_PITCH + timedelta(hours=1), is_closing=True)
+        counts = settle_picks(session, DAY)
+        assert counts["won"] == 1
+        assert counts["no_closing"] == 1
+
+    with session_scope(engine) as session:
+        pick = session.scalars(select(Pick)).one()
+        assert pick.closing_decimal_odds is None
+        assert pick.clv_pct is None
 
 
 def test_settlement_away_winner(engine: Engine) -> None:

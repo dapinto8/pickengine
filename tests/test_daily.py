@@ -1,6 +1,6 @@
 """Tests for the daily-flow pieces: no-cache client, phase report, export."""
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import httpx
@@ -10,11 +10,20 @@ from sqlalchemy import Engine
 from pickengine.backtest.evaluation import evaluate_phase
 from pickengine.backtest.runner import run_backtest
 from pickengine.db import create_schema, get_engine, session_scope
-from pickengine.engine.selection import settle_picks
+from pickengine.engine.elo import EloRatings
+from pickengine.engine.selection import generate_picks, settle_picks
 from pickengine.export import export_track_record_md
 from pickengine.ingest.mlb import StatsApiClient
 from pickengine.ingest.odds import mark_closing_lines
-from pickengine.models import Phase, Team
+from pickengine.models import (
+    Game,
+    GameStatus,
+    GameType,
+    Market,
+    OddsSnapshot,
+    Phase,
+    Team,
+)
 from tests.test_backtest import AWAY, HOME, seed_day
 from tests.test_selection import add_pick
 
@@ -64,6 +73,55 @@ def _seed_paper_history(engine: Engine) -> None:
         mark_closing_lines(session)
         settle_picks(session, d1, phase=Phase.PAPER)
         settle_picks(session, d2, phase=Phase.PAPER)
+
+
+def test_daily_generation_covers_utc_rollover_games(engine: Engine) -> None:
+    """Integration test of the `daily` pick-generation core at 14:00 UTC.
+
+    Three games across the (today, tomorrow) official-date window `daily`
+    generates for: an afternoon game today, a late west coast game tonight
+    whose first pitch is past midnight UTC but whose official date is still
+    today, and tomorrow's early game. All three must be considered and none
+    skipped as already started (the guard compares first_pitch_utc against
+    now, never dates). Pins the official-dates-lag-UTC rollover reasoning so
+    a future date-handling change can't silently drop the night slate.
+    """
+    today, tomorrow = date(2024, 6, 15), date(2024, 6, 16)
+    now = datetime(2024, 6, 15, 14, 0)  # the daily cron moment
+    schedule = [
+        (today, datetime(2024, 6, 15, 17, 10)),  # afternoon game today
+        (today, datetime(2024, 6, 16, 2, 40)),   # west coast: past UTC midnight
+        (tomorrow, datetime(2024, 6, 16, 17, 10)),  # tomorrow's early game
+    ]
+    game_ids = []
+    with session_scope(engine) as session:
+        for pk, (official, first_pitch) in enumerate(schedule, start=1):
+            game = Game(
+                mlb_game_pk=pk, official_date=official, season=2024,
+                game_type=GameType.REGULAR, home_team_id=1, away_team_id=2,
+                status=GameStatus.SCHEDULED, first_pitch_utc=first_pitch,
+            )
+            session.add(game)
+            session.flush()
+            game_ids.append(game.id)
+            for book, label, odds in [
+                ("pinnacle", HOME, 1.91), ("pinnacle", AWAY, 1.91),
+                ("betmgm", HOME, 2.10), ("betmgm", AWAY, 1.80),
+            ]:
+                session.add(
+                    OddsSnapshot(
+                        game_id=game.id, book=book, market=Market.H2H,
+                        outcome_label=label, decimal_odds=odds, line_value=None,
+                        captured_at_utc=datetime(2024, 6, 15, 12, 0), is_closing=False,
+                    )
+                )
+
+        picks = []
+        for day in (today, tomorrow):  # exactly what `daily` iterates
+            picks += generate_picks(session, EloRatings([]), day, Phase.PAPER, now)
+
+        assert {p.game_id for p in picks} == set(game_ids)  # none skipped as started
+        assert all(p.created_at_utc == now for p in picks)
 
 
 def test_evaluate_phase_reports_paper_picks(engine: Engine) -> None:

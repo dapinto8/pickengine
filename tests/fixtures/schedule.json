@@ -8,6 +8,7 @@
           "gameType": "R",
           "season": "2024",
           "gameDate": "2024-06-15T17:10:00Z",
+          "officialDate": "2024-06-15",
           "status": {
             "abstractGameState": "Final",
             "codedGameState": "F",
@@ -31,6 +32,7 @@
           "gameType": "R",
           "season": "2024",
           "gameDate": "2024-06-15T23:05:00Z",
+          "officialDate": "2024-06-15",
           "status": {
             "abstractGameState": "Preview",
             "codedGameState": "S",
@@ -51,6 +53,7 @@
           "gameType": "R",
           "season": "2024",
           "gameDate": "2024-06-15T20:10:00Z",
+          "officialDate": "2024-06-15",
           "status": {
             "abstractGameState": "Preview",
             "codedGameState": "D",
@@ -70,6 +73,7 @@
           "gameType": "S",
           "season": "2024",
           "gameDate": "2024-06-15T18:00:00Z",
+          "officialDate": "2024-06-15",
           "status": {
             "abstractGameState": "Final",
             "codedGameState": "F",
@@ -83,6 +87,28 @@
             "home": {
               "score": 1,
               "team": {"id": 121, "name": "New York Mets"}
+            }
+          }
+        },
+        {
+          "gamePk": 745005,
+          "gameType": "R",
+          "season": "2024",
+          "gameDate": "2024-06-16T02:40:00Z",
+          "officialDate": "2024-06-15",
+          "status": {
+            "abstractGameState": "Preview",
+            "codedGameState": "S",
+            "detailedState": "Scheduled"
+          },
+          "teams": {
+            "away": {
+              "team": {"id": 121, "name": "New York Mets"},
+              "probablePitcher": {"id": 656849, "fullName": "David Peterson"}
+            },
+            "home": {
+              "team": {"id": 144, "name": "Atlanta Braves"},
+              "probablePitcher": {"id": 665742, "fullName": "Spencer Strider"}
             }
           }
         }
