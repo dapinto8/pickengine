@@ -16,7 +16,7 @@ model, and the report flags how many games actually had a market.
 import json
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from statistics import median
 
@@ -26,9 +26,16 @@ from sqlalchemy.orm import Session
 from pickengine.config import Config
 from pickengine.engine.elo import EloRatings
 from pickengine.engine.probability import predict_game
+from pickengine.engine.selection import _closing_snapshot
 from pickengine.models import Game, GameStatus, Phase, Pick, PickStatus
 
 REPORTS_DIR = Path("./reports")
+
+# Closing-capture data-quality guard: when the median gap between the closing
+# snapshot's capture time and first pitch exceeds this, "closing" odds are too
+# stale to trust — likely just the pick-time snapshot re-flagged — and the
+# report carries a warning instead of failing silently with CLV ~ 0.
+STALE_CLOSING_GAP_MINUTES = 120.0
 
 
 def brier_score(pairs: list[tuple[float, int]]) -> float:
@@ -136,7 +143,7 @@ def evaluate_phase(
     if not picks:
         return None
     game_dates = session.scalars(
-        select(Game.date_utc).where(Game.id.in_({p.game_id for p in picks}))
+        select(Game.official_date).where(Game.id.in_({p.game_id for p in picks}))
     ).all()
     return _build_report(
         session, f"phase-{phase.value}", picks,
@@ -174,6 +181,18 @@ def _build_report(
             "max": round(ordered[-1], 3),
         }
 
+    gaps = _closing_gap_minutes(session, picks)
+    closing_capture = None
+    if gaps:
+        # Round before comparing so the stored flag can never contradict the
+        # stored number (a raw median of 120.04 must not print "120" + WARNING).
+        median_gap = round(median(gaps), 1)
+        closing_capture = {
+            "n": len(gaps),
+            "median_gap_minutes": median_gap,
+            "stale": median_gap > STALE_CLOSING_GAP_MINUTES,
+        }
+
     pairs, with_market = _model_predictions(session, start, end, decision_lead, config)
 
     by_month: dict[str, list[Pick]] = defaultdict(list)
@@ -201,6 +220,7 @@ def _build_report(
             "max_drawdown_units": round(max_drawdown([o.profit for o in outcomes]), 3),
         },
         "clv": clv_summary,
+        "closing_capture": closing_capture,
         "model": {
             "n_games": len(pairs),
             "n_with_market": with_market,
@@ -219,6 +239,35 @@ def _build_report(
     }
 
 
+def _closing_gap_minutes(session: Session, picks: list[Pick]) -> list[float]:
+    """Minutes between each settled pick's closing capture and first pitch.
+
+    Re-resolves the closing snapshot the same way settlement did
+    (selection._closing_snapshot); picks without closing odds, a resolvable
+    snapshot, or a known first pitch contribute nothing.
+    """
+    settled = [p for p in picks if p.closing_decimal_odds is not None]
+    if not settled:
+        return []
+    first_pitch = dict(
+        session.execute(
+            select(Game.id, Game.first_pitch_utc).where(
+                Game.id.in_({p.game_id for p in settled})
+            )
+        ).all()
+    )
+    gaps = []
+    for pick in settled:
+        fp = first_pitch.get(pick.game_id)
+        if fp is None:
+            continue
+        snapshot = _closing_snapshot(session, pick)
+        if snapshot is None:
+            continue
+        gaps.append((fp - snapshot.captured_at_utc).total_seconds() / 60)
+    return gaps
+
+
 def _model_predictions(
     session: Session,
     start: date,
@@ -233,13 +282,14 @@ def _model_predictions(
     pairs: list[tuple[float, int]] = []
     with_market = 0
     for game in finals:
-        if not (start <= game.date_utc <= end) or game.first_pitch_utc is None:
+        if not (start <= game.official_date <= end) or game.first_pitch_utc is None:
             continue
         if game.home_score == game.away_score:
             continue  # no binary outcome to score
         prediction = predict_game(
             session, elo, game.id, game.first_pitch_utc - decision_lead,
             blend_weight=config.blend_weight_model, elo_per_fip=config.elo_per_fip,
+            devig_method=config.devig_method,
         )
         if prediction.p_market is not None:
             with_market += 1
@@ -273,6 +323,21 @@ def render_report(report: dict) -> str:
         ]
     else:
         lines += ["", "CLV: no picks with closing lines — not evaluable"]
+
+    capture = report.get("closing_capture")
+    if capture:
+        lines.append(
+            f"  closing captured median {capture['median_gap_minutes']:g} min before "
+            f"first pitch (n={capture['n']})"
+        )
+        if capture["stale"]:
+            lines += [
+                "",
+                f"WARNING: closing captures are stale (median gap > "
+                f"{STALE_CLOSING_GAP_MINUTES:g} min before first pitch) — CLV quality is "
+                "degraded; the closing line may just be the pick-time snapshot "
+                "re-flagged. Check that the capture-odds cron passes are running.",
+            ]
 
     model = report["model"]
     lines += [
@@ -328,7 +393,14 @@ def load_run_meta(run_id: str) -> dict | None:
 def resolve_run_window(
     session: Session, run_id: str
 ) -> tuple[date, date, timedelta]:
-    """Run window from meta file, else from the run's picks; error if neither."""
+    """Run window from meta file, else from the run's picks; error if neither.
+
+    The pick-derived fallback uses the picked games' OFFICIAL dates — the
+    same basis the window is later compared against (_model_predictions) —
+    never Pick.created_at_utc.date(): a decision time that crosses UTC
+    midnight (late west coast game, short lead) would shift the window a day
+    forward and silently drop the first official day from the model metrics.
+    """
     meta = load_run_meta(run_id)
     if meta is not None:
         return (
@@ -336,10 +408,13 @@ def resolve_run_window(
             date.fromisoformat(meta["end"]),
             timedelta(hours=meta["decision_lead_hours"]),
         )
-    created = session.scalars(select(Pick.created_at_utc).where(Pick.run_id == run_id)).all()
-    if not created:
+    game_dates = session.scalars(
+        select(Game.official_date).join(Pick, Pick.game_id == Game.id).where(
+            Pick.run_id == run_id
+        )
+    ).all()
+    if not game_dates:
         raise ValueError(
             f"run {run_id!r} has no metadata file and no picks — nothing to evaluate"
         )
-    times: list[datetime] = sorted(created)
-    return times[0].date(), times[-1].date(), timedelta(hours=4)
+    return min(game_dates), max(game_dates), timedelta(hours=4)

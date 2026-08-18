@@ -65,7 +65,7 @@ def export_track_record_md(
         line_suffix = f" {pick.line_value:+g}" if pick.line_value is not None else ""
         lines.append(
             f"| {i} | {pick.created_at_utc.strftime('%Y-%m-%d %H:%M')} "
-            f"| {game.date_utc.isoformat()} | {matchup} "
+            f"| {game.official_date.isoformat()} | {matchup} "
             f"| {pick.outcome_label}{line_suffix} | {pick.market.value} "
             f"| {pick.decimal_odds_at_pick:.2f} | {pick.book} "
             f"| {pick.stake_units:g} | {pick.status.value} | {units_cell} | {clv_cell} |"

@@ -1,7 +1,9 @@
 """SQLAlchemy ORM models.
 
-All datetimes are naive UTC (SQLite has no timezone-aware type); all dates are
-UTC dates. Conversion happens at the edges (ingestion and CLI), never here.
+All datetimes are naive UTC (SQLite has no timezone-aware type). Conversion
+happens at the edges (ingestion and CLI), never here. Game.official_date is
+the one deliberate exception to UTC: it is MLB's league-assigned local
+calendar date, used for identity/grouping only — see its docstring.
 
 Lookahead discipline lives in the timestamp semantics:
 - PitcherStatsSnapshot.as_of_date: the snapshot contains stats through the day
@@ -21,6 +23,7 @@ from sqlalchemy import (
     Index,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -85,12 +88,22 @@ class Player(Base):
 
 
 class Game(Base):
+    """One MLB game.
+
+    official_date is MLB's officialDate: the local calendar date the league
+    assigns to the game (a late ET night game keeps its ET date even though
+    first pitch rolls past midnight UTC). It is the game's identity/grouping
+    date — the date used for matching odds rows, CLI --date arguments, the
+    daily loops, and reports. first_pitch_utc remains the ONLY field used for
+    time-ordering, lookahead checks, and pre-game logic.
+    """
+
     __tablename__ = "games"
-    __table_args__ = (Index("ix_games_date_utc", "date_utc"),)
+    __table_args__ = (Index("ix_games_official_date", "official_date"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     mlb_game_pk: Mapped[int] = mapped_column(unique=True)
-    date_utc: Mapped[date]
+    official_date: Mapped[date]
     season: Mapped[int]
     game_type: Mapped[GameType] = mapped_column(_enum(GameType))
     home_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))
@@ -107,8 +120,10 @@ class PitcherStatsSnapshot(Base):
     """Pitcher stats known *before* as_of_date.
 
     Contains stats through as_of_date - 1 day, usable to predict games on
-    as_of_date or later. Never join a snapshot to a game with
-    game.date_utc < snapshot.as_of_date.
+    as_of_date or later. The date basis is official dates end to end:
+    as_of_date, the game-log split dates it aggregates, and last_start_date
+    are all MLB official dates. Never join a snapshot to a game with
+    game.official_date < snapshot.as_of_date.
     """
 
     __tablename__ = "pitcher_stats_snapshots"
@@ -134,6 +149,17 @@ class OddsSnapshot(Base):
     __tablename__ = "odds_snapshots"
     __table_args__ = (
         Index("ix_odds_game_market_captured", "game_id", "market", "captured_at_utc"),
+        # Dedup key for ingestion (INSERT .. ON CONFLICT DO NOTHING).
+        # line_value is NULL for h2h and SQLite treats NULLs as DISTINCT in
+        # unique constraints, so it is coalesced to a sentinel no real
+        # total/runline can take — otherwise h2h duplicates would never
+        # conflict. Keep in sync with the DDL in db._migrate.
+        Index(
+            "uq_odds_snapshot_key",
+            "game_id", "book", "market", "outcome_label", "captured_at_utc",
+            text("coalesce(line_value, -1e9)"),
+            unique=True,
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from pickengine.engine.elo import K_FACTOR
 from pickengine.engine.pitching import ELO_PER_FIP
-from pickengine.engine.probability import BLEND_WEIGHT_MODEL
+from pickengine.engine.probability import BLEND_WEIGHT_MODEL, DEVIG_FUNCS, DEVIG_METHOD
 from pickengine.engine.selection import MIN_EV
 
 DEFAULT_CONFIG_PATH = Path("./pickengine.toml")
@@ -25,6 +25,14 @@ class Config:
     elo_per_fip: float = ELO_PER_FIP
     blend_weight_model: float = BLEND_WEIGHT_MODEL
     min_ev: float = MIN_EV
+    devig_method: str = DEVIG_METHOD  # "multiplicative" | "power"
+
+    def __post_init__(self) -> None:
+        if self.devig_method not in DEVIG_FUNCS:
+            raise ValueError(
+                f"devig_method must be one of {sorted(DEVIG_FUNCS)}, "
+                f"got {self.devig_method!r}"
+            )
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> Config:
@@ -51,7 +59,8 @@ def save_config(config: Config, path: str | Path = DEFAULT_CONFIG_PATH) -> Path:
         f"elo_k = {config.elo_k}\n"
         f"elo_per_fip = {config.elo_per_fip}\n"
         f"blend_weight_model = {config.blend_weight_model}\n"
-        f"min_ev = {config.min_ev}\n",
+        f"min_ev = {config.min_ev}\n"
+        f'devig_method = "{config.devig_method}"\n',
         encoding="utf-8",
     )
     return path

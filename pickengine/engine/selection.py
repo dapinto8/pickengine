@@ -4,7 +4,11 @@ Pipeline for a date (h2h only for now; totals come later):
 1. Every game that day that has not started yet (first_pitch_utc > as_of) and
    has a complete de-vigged market quote gets p_blend for home and away.
 2. Each side's EV is computed against the best available decimal odds across
-   books (each book's LATEST usable quote — never a stale better price).
+   books (each book's LATEST usable quote per outcome, via latest_h2h_prices
+   — never a stale better price that a newer capture has since replaced).
+   The de-vigged consensus, by contrast, only ever pairs quotes from one
+   capture (see latest_h2h_quotes) — pricing needs freshness, de-vigging
+   needs coexistence.
 3. Hard rules, in order: EV >= MIN_EV; at most one pick per game (no
    correlated outcomes — the higher-EV side wins); if more than
    MAX_PICKS_PER_DAY qualify, keep the highest-EV ones. Flat STAKE_UNITS.
@@ -34,8 +38,9 @@ from pickengine.engine.elo import EloRatings
 from pickengine.engine.pitching import ELO_PER_FIP
 from pickengine.engine.probability import (
     BLEND_WEIGHT_MODEL,
+    DEVIG_METHOD,
     SHARP_BOOK_PRIORITY,
-    latest_h2h_quotes,
+    latest_h2h_prices,
     predict_game,
 )
 from pickengine.ingest.odds import get_usable_odds
@@ -76,8 +81,12 @@ def generate_picks(
     min_ev: float = MIN_EV,
     blend_weight: float = BLEND_WEIGHT_MODEL,
     elo_per_fip: float = ELO_PER_FIP,
+    devig_method: str = DEVIG_METHOD,
 ) -> list[Pick]:
     """Select and persist picks for one date. Returns the new Pick rows.
+
+    `target_date` is an MLB official date (Game.official_date); whether a
+    game has started is judged only against first_pitch_utc.
 
     Decision time: pass either one fixed `as_of` for the whole day (live /
     paper use: "now"), or `decision_lead` to evaluate each game at
@@ -90,7 +99,7 @@ def generate_picks(
     """
     if (as_of is None) == (decision_lead is None):
         raise ValueError("provide exactly one of as_of or decision_lead")
-    games = session.scalars(select(Game).where(Game.date_utc == target_date)).all()
+    games = session.scalars(select(Game).where(Game.official_date == target_date)).all()
     run_filter = Pick.run_id == run_id if run_id is not None else Pick.run_id.is_(None)
     already_picked = set(
         session.scalars(
@@ -110,12 +119,12 @@ def generate_picks(
         game_as_of = as_of if as_of is not None else game.first_pitch_utc - decision_lead
         if game.first_pitch_utc <= game_as_of:
             continue  # can't bet a game that has started
-        quotes = latest_h2h_quotes(get_usable_odds(session, game.id, game_as_of))
-        if not quotes:
+        prices = latest_h2h_prices(get_usable_odds(session, game.id, game_as_of))
+        if not prices:
             continue  # no odds at all: skip before doing any model work
         prediction = predict_game(
             session, elo, game.id, game_as_of,
-            blend_weight=blend_weight, elo_per_fip=elo_per_fip,
+            blend_weight=blend_weight, elo_per_fip=elo_per_fip, devig_method=devig_method,
         )
         if prediction.p_market is None:
             continue
@@ -128,7 +137,7 @@ def generate_picks(
         )
         game_best: Candidate | None = None
         for label, p_model, p_market, p_blend in sides:
-            side_quotes = [s for (_, lbl), s in quotes.items() if lbl == label]
+            side_quotes = [s for (_, lbl), s in prices.items() if lbl == label]
             if not side_quotes:
                 continue
             best = max(side_quotes, key=lambda s: s.decimal_odds)
@@ -167,7 +176,8 @@ def settle_picks(
     phase: Phase | None = None,
     run_id: str | None = None,
 ) -> dict[str, int]:
-    """Resolve pending picks for a date; fill closing odds and CLV.
+    """Resolve pending picks for a date (MLB official date); fill closing
+    odds and CLV.
 
     Optional phase/run_id filters scope settlement (a backtest run settles
     only its own picks, never concurrent paper/live ones).
@@ -175,7 +185,7 @@ def settle_picks(
     query = (
         select(Pick, Game)
         .join(Game, Pick.game_id == Game.id)
-        .where(Game.date_utc == target_date, Pick.status == PickStatus.PENDING)
+        .where(Game.official_date == target_date, Pick.status == PickStatus.PENDING)
     )
     if phase is not None:
         query = query.where(Pick.phase == phase)
@@ -218,9 +228,17 @@ def settle_picks(
 def _closing_snapshot(session: Session, pick: Pick) -> OddsSnapshot | None:
     """The closing quote for a pick's market/outcome/line.
 
+    Only snapshots captured strictly before first pitch qualify —
+    mark_closing_lines never flags later ones, but an imported archive can
+    stamp is_closing on post-game rows, and settling CLV against a price from
+    after first pitch would leak the result into the primary metric.
+
     Book preference: the pick's own book, then SHARP_BOOK_PRIORITY, then
     whichever closing flag was captured latest.
     """
+    game = session.get(Game, pick.game_id)
+    if game is None or game.first_pitch_utc is None:
+        return None  # cannot prove any snapshot is pre-game
     line_filter = (
         OddsSnapshot.line_value.is_(None)
         if pick.line_value is None
@@ -233,6 +251,7 @@ def _closing_snapshot(session: Session, pick: Pick) -> OddsSnapshot | None:
             OddsSnapshot.outcome_label == pick.outcome_label,
             line_filter,
             OddsSnapshot.is_closing,
+            OddsSnapshot.captured_at_utc < game.first_pitch_utc,
         )
     ).all()
     if not closers:

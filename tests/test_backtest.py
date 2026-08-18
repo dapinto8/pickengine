@@ -11,6 +11,7 @@ from pickengine.backtest.evaluation import (
     calibration_table,
     evaluate_run,
     max_drawdown,
+    render_report,
 )
 from pickengine.backtest.runner import (
     _assert_pick_integrity,
@@ -28,6 +29,8 @@ from pickengine.models import (
     Phase,
     Pick,
     PickStatus,
+    PitcherStatsSnapshot,
+    Player,
     Team,
 )
 
@@ -69,7 +72,7 @@ def seed_day(
 ) -> Game:
     """One final game with a favorable home price and closing lines."""
     game = Game(
-        mlb_game_pk=pk, date_utc=day, season=day.year, game_type=GameType.REGULAR,
+        mlb_game_pk=pk, official_date=day, season=day.year, game_type=GameType.REGULAR,
         home_team_id=1, away_team_id=2, status=GameStatus.FINAL,
         home_score=home_score, away_score=away_score, first_pitch_utc=first_pitch(day),
     )
@@ -90,8 +93,10 @@ def seed_day(
     quote("pinnacle", HOME, 1.91, early)
     quote("pinnacle", AWAY, 1.91, early)
     quote("betmgm", HOME, 2.10, early)
+    quote("betmgm", AWAY, 1.80, early)  # books contribute complete pairs only
     # A juicier price that appears only AFTER decision time: must not be taken.
     quote("betmgm", HOME, 2.50, late)
+    quote("betmgm", AWAY, 1.55, late)
     # Closing lines.
     quote("betmgm", HOME, 2.00, fp - timedelta(minutes=10), closing=True)
     quote("pinnacle", HOME, 1.90, fp - timedelta(minutes=10), closing=True)
@@ -182,6 +187,65 @@ def test_integrity_guard_catches_unbacked_price(engine: Engine) -> None:
         session.flush()
         with pytest.raises(RuntimeError, match="no snapshot"):
             _assert_pick_integrity(session, EloRatings([]), phantom)
+
+
+def test_integrity_guard_catches_broken_starter_snapshot_helper(
+    engine: Engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression the old check could never detect: it re-ran the helper
+    and verified the helper's own filter, so a broken starter_snapshot passed
+    silently. The independent-oracle check must catch a helper that returns a
+    snapshot dated after the cutoff."""
+    d1 = date(2024, 6, 15)
+    with session_scope(engine) as session:
+        game = seed_day(session, 1, d1, 5, 3)
+        pitcher = Player(mlb_id=656849, name="David Peterson", position="P")
+        session.add(pitcher)
+        session.flush()
+        game.home_starter_player_id = pitcher.id
+        # A pick that passes the decision-time and quote checks.
+        pick = Pick(
+            game_id=game.id, market=Market.H2H, outcome_label=HOME, line_value=None,
+            decimal_odds_at_pick=2.10, book="betmgm", model_probability=0.53,
+            market_consensus_probability=0.5, ev=0.07, stake_units=1.0,
+            created_at_utc=first_pitch(d1) - timedelta(hours=4),
+            status=PickStatus.PENDING, phase=Phase.BACKTEST, run_id="bad",
+        )
+        session.add(pick)
+        session.flush()
+
+        future = PitcherStatsSnapshot(
+            player_id=pitcher.id, as_of_date=date(2024, 6, 20), season=2024,
+            ip=10.0, fip=3.0, k_per_9=9.0, bb_per_9=3.0, games_started=2,
+        )
+        monkeypatch.setattr(
+            "pickengine.backtest.runner.starter_snapshot", lambda *a, **k: future
+        )
+        with pytest.raises(RuntimeError, match="lookahead violation.*pitcher snapshot"):
+            _assert_pick_integrity(session, EloRatings([]), pick)
+
+
+def test_closing_capture_gap_metric_and_stale_warning(engine: Engine) -> None:
+    d1 = date(2024, 6, 15)
+    with session_scope(engine) as session:
+        seed_day(session, 1, d1, 5, 3)  # closing snapshots 10 min before first pitch
+        run_backtest(session, d1, d1, run_id="gaprun", write_meta=False)
+        report = evaluate_run(session, "gaprun", d1, d1, timedelta(hours=4))
+        capture = report["closing_capture"]
+        assert capture["n"] == 1
+        assert capture["median_gap_minutes"] == pytest.approx(10.0)
+        assert capture["stale"] is False
+        assert "WARNING" not in render_report(report)
+
+    # Closing snapshots captured 3h before first pitch: stale, warning shown.
+    with session_scope(engine) as session:
+        for snap in session.scalars(select(OddsSnapshot).where(OddsSnapshot.is_closing)):
+            snap.captured_at_utc = first_pitch(d1) - timedelta(hours=3)
+    with session_scope(engine) as session:
+        report = evaluate_run(session, "gaprun", d1, d1, timedelta(hours=4))
+        assert report["closing_capture"]["median_gap_minutes"] == pytest.approx(180.0)
+        assert report["closing_capture"]["stale"] is True
+        assert "WARNING" in render_report(report)
 
 
 def test_evaluate_run_report(engine: Engine) -> None:

@@ -82,7 +82,7 @@ def test_sync_schedule(engine: Engine) -> None:
         counts = sync_schedule(session, client, date(2024, 6, 15), date(2024, 6, 15))
 
     assert counts == {
-        "games": 3,
+        "games": 4,
         "postponed": 1,
         "missing_probables": 1,  # scheduled game's home side; postponed game not counted
         "skipped_game_type": 1,  # the spring-training game
@@ -90,13 +90,13 @@ def test_sync_schedule(engine: Engine) -> None:
 
     with session_scope(engine) as session:
         games = {g.mlb_game_pk: g for g in session.scalars(select(Game))}
-        assert set(games) == {745001, 745002, 745003}
+        assert set(games) == {745001, 745002, 745003, 745005}
 
         final = games[745001]
         assert final.status is GameStatus.FINAL
         assert (final.home_score, final.away_score) == (3, 5)
         assert final.first_pitch_utc == datetime(2024, 6, 15, 17, 10)
-        assert final.date_utc == date(2024, 6, 15)
+        assert final.official_date == date(2024, 6, 15)
 
         scheduled = games[745002]
         assert scheduled.status is GameStatus.SCHEDULED
@@ -106,6 +106,12 @@ def test_sync_schedule(engine: Engine) -> None:
 
         assert games[745003].status is GameStatus.POSTPONED
 
+        # Late ET night game: first pitch past midnight UTC, but the identity
+        # date is MLB's official date, NOT the UTC calendar date.
+        late = games[745005]
+        assert late.first_pitch_utc == datetime(2024, 6, 16, 2, 40)
+        assert late.official_date == date(2024, 6, 15)
+
         players = {p.mlb_id for p in session.scalars(select(Player))}
         assert players == {665742, 656849, 543037}
 
@@ -113,7 +119,23 @@ def test_sync_schedule(engine: Engine) -> None:
     with session_scope(engine) as session:
         sync_schedule(session, client, date(2024, 6, 15), date(2024, 6, 15))
     with session_scope(engine) as session:
-        assert len(session.scalars(select(Game)).all()) == 3
+        assert len(session.scalars(select(Game)).all()) == 4
+
+
+def test_sync_schedule_missing_official_date_raises(engine: Engine) -> None:
+    payload = json.loads((FIXTURES / "schedule.json").read_text(encoding="utf-8"))
+    del payload["dates"][0]["games"][0]["officialDate"]
+
+    class InlineClient:
+        def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+            if path.startswith("teams"):
+                return json.loads((FIXTURES / "teams.json").read_text(encoding="utf-8"))
+            return payload
+
+    with session_scope(engine) as session:
+        sync_teams(session, InlineClient())
+        with pytest.raises(ValueError, match="officialDate"):
+            sync_schedule(session, InlineClient(), date(2024, 6, 15), date(2024, 6, 15))
 
 
 def _seed_pitcher_and_game(engine: Engine, game_date: date) -> None:
@@ -126,7 +148,7 @@ def _seed_pitcher_and_game(engine: Engine, game_date: date) -> None:
         session.add(
             Game(
                 mlb_game_pk=745900,
-                date_utc=game_date,
+                official_date=game_date,
                 season=game_date.year,
                 game_type="regular",
                 home_team_id=home.id,
